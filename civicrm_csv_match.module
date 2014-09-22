@@ -19,9 +19,10 @@ function civicrm_csv_match_menu()
     'type' => MENU_CALLBACK,
   );
 	$items['civicrm/csvmatch/dash'] = array(
-    'title' => 'CSV tool',
+    'title' => 'Clean',
     'type' => MENU_DEFAULT_LOCAL_TASK,
     'access arguments' =>  array('view all contacts'),
+    'weight' => 2,
   );
 	$items['civicrm/csvmatch/assign/ajax'] = array(
     'type' => MENU_CALLBACK,
@@ -35,7 +36,7 @@ function civicrm_csv_match_menu()
     'access arguments' =>  array('view all contacts'),
   );
 	$items['civicrm/csvmatch/upload'] = array(
-    'title' => 'CSV tool: upload CSV file',
+    'title' => 'Upload CSV file',
     'page callback' => 'drupal_get_form',
     'page arguments' => array('civicrm_csv_match_upload_form'),
     'access arguments' =>  array('view all contacts'),
@@ -43,12 +44,12 @@ function civicrm_csv_match_menu()
     'weight' => 1,
   );
 	$items['civicrm/csvmatch/download'] = array(
-    'title' => 'CSV tool: download CSV file',
+    'title' => 'Download Cleaned CSV file',
     'page callback' => 'drupal_get_form',
     'page arguments' => array('civicrm_csv_match_download_form'),
     'access arguments' =>  array('view all contacts'),
     'type' => MENU_LOCAL_TASK,
-    'weight' => 2,
+    'weight' => 3,
   );
 	$items['civicrm/csvmatch/drop'] = array(
     'title' => 'CSV tool: reset',
@@ -205,10 +206,22 @@ function civicrm_csv_match_upload_form() {
 
   $form['#attributes'] = array('enctype' => "multipart/form-data");
   $form['csvfile'] = array(
-    '#prefix' => '<p>This tool takes a .csv file with first, last names and email
-    in the first three columns, tries to find the right people (with your help),
-      and then outputs a new version with a CiviCRM contact ID as the first column.</p>
-      <p>This is then more useful as data for the various import tools.</p>',
+    '#prefix' => '<p>This tool takes a .csv file and tries to clean names and find the right people (with your help),
+      and then outputs a new version with details added, including a CiviCRM contact ID as the first column.</p>
+      <p>The first four column MUST be as follows</p>
+      <ol>
+      <li>Title</li>
+      <li>First name</li>
+      <li>Last name</li>
+      <li>Email</li>
+      </ol>
+      <p>It is fine (normal) for one or more of these to be blank.</p>
+      <p>If only the first name column is used, this name is considered for unpacking into different columns:</p>
+      <ul><li>Mr. Fred Flintstone</li>
+      <li>Fred Flintstone</li>
+      <li>Flintstone, Fred</li>
+      </ul>
+      <p>The resulting .csv file is then more useful as data for the various import tools.</p>',
     '#type' => 'file',
     '#title' => t('Choose a file'),
     '#title_display' => 'invisible',
@@ -249,9 +262,10 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   while ($line = fgetcsv($fh)){
     $line = array(
       'contact_id' => 0,
-      'fname' => $line[0],
-      'lname' => $line[1],
-      'email' => $line[2],
+      'title' => $line[0],
+      'fname' => $line[1],
+      'lname' => $line[2],
+      'email' => $line[3],
       'data' => serialize($line),
     );
 
@@ -260,6 +274,9 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
       $header = 0;
     }
     else {
+      if (!$line['lname'] && !$line['title'] && $line['fname']) {
+        CiviCRMCSVMatch::cleanName($line);
+      }
       CiviCRMCSVMatch::findContact($line);
       $line['resolution'] = serialize($line['resolution']);
     }
@@ -291,7 +308,6 @@ function civicrm_csv_match_download_form() {
   );
 }
 function civicrm_csv_match_download_form_submit($form, &$form_state) {
-  $x=1;
 
   if ($form_state['triggering_element']['#value'] == 'Download .csv file') {
     // If there is no table, we're done.
@@ -312,11 +328,14 @@ function civicrm_csv_match_download_form_submit($form, &$form_state) {
     drupal_add_http_header('Content-Type', 'text/csv; utf-8');
     drupal_add_http_header('Content-Disposition', 'attachment; filename = data.csv');
 
+    // prepend contact ID and new name fields - just so we're not overwriting the old data.
+    print '"Contact ID","Title", "First Name", "Last Name"';
     $header = $rows->fetchAssoc();
     // unpack original header line
     $data = unserialize($header['data']);
-    // prepend contact ID
-    print '"Contact ID"';
+    $data[0] = "Orig: $data[0]";
+    $data[1] = "Orig: $data[1]";
+    $data[2] = "Orig: $data[2]";
     foreach ($data as $_) {
       print "," . CiviCRMCSVMatch::csvSafe($_);
     }
@@ -324,8 +343,11 @@ function civicrm_csv_match_download_form_submit($form, &$form_state) {
 
     while ( $row = $rows->fetchAssoc()) {
       $data = unserialize($row['data']);
-      // prepend contact ID
+      // prepend contact ID and name fields
       print ($row['contact_id'] ? $row['contact_id'] : '""');
+      print "," . CiviCRMCSVMatch::csvSafe($row['title']);
+      print "," . CiviCRMCSVMatch::csvSafe($row['fname']);
+      print "," . CiviCRMCSVMatch::csvSafe($row['lname']);
       foreach ($data as $_) {
         print "," . CiviCRMCSVMatch::csvSafe($_);
       }
@@ -340,8 +362,10 @@ function civicrm_csv_match_download_form_submit($form, &$form_state) {
   }
 }
 
+
 class CiviCRMCSVMatch
 {
+  protected static $titles_regexp;
   public static function findContact(&$record) {
     // if found, set contact ID, set resolution to serialized "update Foo bar".
     // if not found, store possible matches in array of possibilities keyed by contact_id
@@ -495,6 +519,46 @@ class CiviCRMCSVMatch
     $record['state'] = 'impossible';
     $record['contact_id'] = 0;
     $record['resolution'] = 'Impossible - no matches for this one.';
+  }
+  public static function cleanName(&$record) {
+    $names = trim($record['fname']);
+    $titles = static::getTitleRegex();
+
+    if (preg_match('/^([^,]+)\s*,\s*([^,]+)$/', $names, $matches)) {
+      // got name in form: Last, First.
+      $record['lname'] = $matches[1];
+      $record['fname'] = trim($matches[2]);
+      if (preg_match("/^($titles)\s+(.+)$/", $record['fname'], $matches)) {
+        $record['title'] = $matches[1];
+        $record['fname'] = $matches[2];
+      }
+      return;
+    }
+
+    $names = preg_split('/\s+/', $names);
+    if (count($names)==1) {
+      // nothing we can do.
+      return;
+    }
+    // prefix?
+    if (preg_match("/^$titles$/", $names[0])) {
+      $record['title'] = array_shift($names);
+    }
+    // Let's assume the first word is the first name
+    $record['fname'] = array_shift($names);
+    $record['lname'] = implode(' ', $names);
+  }
+  public static function getTitleRegex() {
+    if (empty(static::$titles_regexp)) {
+      require_once 'sites/default/civicrm.settings.php';
+      require_once 'CRM/Core/Config.php';
+      require_once 'api/api.php';
+      $config = CRM_Core_Config::singleton( );
+
+      // @todo load the ones in use.
+      static::$titles_regexp = '(?:Ms|Miss|Mrs|Mr|Dr|Prof|Rev|Cllr|Rt Hon).?';
+    }
+    return static::$titles_regexp;
   }
     public static function csvSafe($string) {
       return '"' . str_replace('"','""',$string) . '"';
