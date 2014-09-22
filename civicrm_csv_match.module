@@ -1,0 +1,502 @@
+<?php
+
+/**
+ * @file
+ * Try to find contacts matching data in csv file through interactive process and output a csv file which can then be used for importing contributions etc.
+ *
+ */
+
+
+/**
+  * Implements hook_menu()
+  */
+function civicrm_csv_match_menu()
+{
+	$items['civicrm/csvmatch'] = array(
+    'page callback' => 'civicrm_csv_match_dash',
+    //'page arguments' => array(1,'thanks',0),
+    'access arguments' =>  array('view all contacts'),
+    'type' => MENU_CALLBACK,
+  );
+	$items['civicrm/csvmatch/dash'] = array(
+    'title' => 'CSV tool',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'access arguments' =>  array('view all contacts'),
+  );
+	$items['civicrm/csvmatch/assign/ajax'] = array(
+    'type' => MENU_CALLBACK,
+    'page callback' => 'civicrm_csv_match_assign',
+    'page arguments' => array('ajax'),
+    'access arguments' =>  array('view all contacts'),
+  );
+	$items['civicrm/csvmatch/assign'] = array(
+    'type' => MENU_CALLBACK,
+    'page callback' => 'civicrm_csv_match_assign',
+    'access arguments' =>  array('view all contacts'),
+  );
+	$items['civicrm/csvmatch/upload'] = array(
+    'title' => 'CSV tool: upload CSV file',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('civicrm_csv_match_upload_form'),
+    'access arguments' =>  array('view all contacts'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 1,
+  );
+	$items['civicrm/csvmatch/download'] = array(
+    'title' => 'CSV tool: download CSV file',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('civicrm_csv_match_download_form'),
+    'access arguments' =>  array('view all contacts'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 2,
+  );
+	$items['civicrm/csvmatch/drop'] = array(
+    'title' => 'CSV tool: reset',
+    'page callback' => 'civicrm_csv_match_drop',
+    'access arguments' =>  array('view all contacts'),
+    'type' => MENU_CALLBACK,
+  );
+	return $items;
+}
+
+// custom pages
+/**
+ * List the work to do, if any.
+ */
+function civicrm_csv_match_dash() {
+
+  // If there is no table, we're done.
+  if (!db_query('SELECT id FROM {civicrm_csv_match_cache} LIMIT 1')->rowCount()) {
+    drupal_set_message("There is no data waiting to be matched. Care to upload a new CSV file?");
+    drupal_goto('civicrm/csvmatch/upload');
+  }
+
+  // There is a table. Show the contents that's outstanding.
+  $rows = db_select("civicrm_csv_match_cache", "todo")
+    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
+    ->condition('state', 'header', '!=')
+    ->orderBy('state','DESC')
+    ->execute();
+
+  $html = "<h2>Data</h2><table><thead>
+     <tr><th>First Name</th><th>Last Name</th><th>Email</th><th>Resolution</th></tr>
+     </thead><tbody>";
+  while($row = $rows->fetchAssoc()) {
+    $html .= "<tr class='$row[state]'><td>" .
+      htmlspecialchars($row['fname']) . "</td><td>" .
+      htmlspecialchars($row['lname']) . "</td><td>" .
+      htmlspecialchars($row['email']) . "</td><td>" ;
+
+    if ($row['resolution']) {
+      $res = unserialize($row['resolution']);
+      if (is_string($res)) {
+        if ($row['contact_id']) {
+          $html .= "Found: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>";
+        }
+        else {
+          $html .= $res;
+        }
+      }
+      elseif (is_array($res)) {
+        $html .= "Could be: <ul>";
+        foreach ($res as $cid=>$r) {
+          $html .= "<li>"
+            .htmlspecialchars($r['name'] . " ($r[match])")
+            ." <a href='/civicrm/contact/view?reset=1&cid=$cid' target='_blank' >View</a> | "
+            ." <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=$cid' class='choose-link' data-cid='$cid' >Choose</a> "
+            .'</li>';
+        }
+        $html .= "</ul>";
+      }
+      else {
+        // shouldn't happen
+        $html .= 'ERROR';
+      }
+      $html .= '</td></tr>';
+    }
+  }
+  $html .= "</tbody></table>";
+
+  return array('#markup' => $html,
+    '#attached' => array(
+      'js'  => array( drupal_get_path('module','civicrm_csv_match') . '/csv_match.js'),
+      'css' => array( drupal_get_path('module','civicrm_csv_match') . '/csv_match.css'),
+      ));
+}
+
+/**
+ * Assign contact
+ */
+function civicrm_csv_match_assign($ajax='') {
+  require_once 'sites/default/civicrm.settings.php';
+  require_once 'CRM/Core/Config.php';
+  require_once 'api/api.php';
+  $config = CRM_Core_Config::singleton( );
+
+  $record_id = (int) $_GET['rec'];
+  $contact_id = (int) $_GET['cid'];
+  if (!($record_id>0) || !($contact_id>0)) {
+    if ($ajax) {
+      return 'Odd call. Try reloading the page.';
+    }
+    drupal_set_message("Odd call. Ignored it.");
+    drupal_goto('civicrm/csvmatch');
+  }
+
+  // load the record
+  $record = db_select("civicrm_csv_match_cache", "todo")
+    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
+    ->condition('id', $record_id)
+    ->condition('state', 'header', '!=')
+    ->execute()
+    ->fetchAssoc();
+  if (!$record) {
+    if ($ajax) {
+      return 'Odd call. Try reloading the page.';
+    }
+    drupal_set_message("Odd call 2. Ignored it.");
+    drupal_goto('civicrm/csvmatch');
+  }
+
+  // check contact_id exists.
+  $params = array( 'version' => 3, 'sequential' => 1, 'contact_id' => $contact_id);
+  $result = civicrm_api('Contact', 'get', $params);
+  if ($result['count']!=1) {
+    if ($ajax) {
+      return 'Odd call. Try reloading the page.';
+    }
+    drupal_set_message("Odd call 3. Ignored it.");
+    drupal_goto('civicrm/csvmatch');
+  }
+
+  // OK, update it.
+  db_update('civicrm_csv_match_cache')
+    ->fields(array(
+      'state' => 'found',
+      'contact_id' => $contact_id,
+      'resolution' => serialize($result['values'][0]['display_name']),
+    ))
+    ->condition('id', $record_id)
+    ->execute();
+
+    if ($ajax) {
+      // need to return the HTML for the chosen person.
+      print "Found: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >"
+        . htmlspecialchars($result['values'][0]['display_name'])
+        .  "</a> ";
+      exit;
+    }
+
+  drupal_goto('civicrm/csvmatch', array(
+    'query' => array(
+      'updated_id' => $record_id)));
+}
+
+/**
+ * List the work to do, if any.
+ */
+function civicrm_csv_match_upload_form() {
+
+  // Warn if data exists.
+  if (db_query('SELECT id FROM {civicrm_csv_match_cache} LIMIT 1')->rowCount()) {
+    $form[] = array(
+      '#markup' => "<div class='messages warning'>There's existing data. If you upload a file this will be lost. You can <a href='/civicrm/csvmatch/download' >download the data</a> now.</div>");
+  }
+
+  $form['#attributes'] = array('enctype' => "multipart/form-data");
+  $form['csvfile'] = array(
+    '#prefix' => '<p>This tool takes a .csv file with first, last names and email
+    in the first three columns, tries to find the right people (with your help),
+      and then outputs a new version with a CiviCRM contact ID as the first column.</p>
+      <p>This is then more useful as data for the various import tools.</p>',
+    '#type' => 'file',
+    '#title' => t('Choose a file'),
+    '#title_display' => 'invisible',
+  );
+
+  $form['upload'] = array(
+    '#type' => 'submit',
+    '#value' => t('Upload and process'),
+  );
+
+  return $form;
+}
+
+/**
+ * Process the uploaded file.
+ */
+function civicrm_csv_match_upload_form_submit($form, &$form_state) {
+  require_once 'sites/default/civicrm.settings.php';
+  require_once 'CRM/Core/Config.php';
+  require_once 'api/api.php';
+  $config = CRM_Core_Config::singleton( );
+
+  // If there is data in the table, empty it.
+  db_truncate('civicrm_csv_match_cache')->execute();
+
+  // check the file uploaded.
+  $filename = $_FILES['files']['tmp_name']['csvfile'];
+  $filetype = $_FILES['files']['type']['csvfile'];
+
+  if ($filetype != 'text/csv') {
+    drupal_set_message("Uploaded file not recognised as csv");
+    return $form;
+  }
+
+  // open the file and import the data.
+  $fh = fopen($filename,'r');
+  $header=1;
+  while ($line = fgetcsv($fh)){
+    $line = array(
+      'contact_id' => 0,
+      'fname' => $line[0],
+      'lname' => $line[1],
+      'email' => $line[2],
+      'data' => serialize($line),
+    );
+
+    if ($header) {
+      $line['state'] = 'header';
+      $header = 0;
+    }
+    else {
+      CiviCRMCSVMatch::findContact($line);
+      $line['resolution'] = serialize($line['resolution']);
+    }
+
+    $id = db_insert('civicrm_csv_match_cache')
+      ->fields($line)
+      ->execute();
+  }
+  fclose($fh);
+  unlink($filename);
+
+  $form_state['redirect'] = 'civicrm/csvmatch/dash';
+}
+
+/**
+ * List the work to do, if any.
+ */
+function civicrm_csv_match_download_form() {
+
+  return array(
+    'download' => array(
+      '#type' => 'submit',
+      '#value' => 'Download .csv file',
+    ),
+    'delete' => array(
+      '#type' => 'submit',
+      '#value' => 'Delete data',
+    )
+  );
+}
+function civicrm_csv_match_download_form_submit($form, &$form_state) {
+  $x=1;
+
+  if ($form_state['triggering_element']['#value'] == 'Download .csv file') {
+    // If there is no table, we're done.
+    if (!db_query('SELECT id FROM {civicrm_csv_match_cache} LIMIT 1')->rowCount()) {
+      drupal_set_message("There is no data. Care to upload a new CSV file?");
+      drupal_goto('civicrm/csvmatch/upload');
+    }
+
+    // There is a table. Show the contents that's outstanding.
+    $rows = db_select("civicrm_csv_match_cache", "todo")
+      ->fields('todo') // all fields
+      ->orderBy('id') // maintain original order
+      ->execute();
+
+    // output CSV
+
+    // Add the headers needed to let the browser know this is a csv file download.
+    drupal_add_http_header('Content-Type', 'text/csv; utf-8');
+    drupal_add_http_header('Content-Disposition', 'attachment; filename = data.csv');
+
+    $header = $rows->fetchAssoc();
+    // unpack original header line
+    $data = unserialize($header['data']);
+    // prepend contact ID
+    print '"Contact ID"';
+    foreach ($data as $_) {
+      print "," . CiviCRMCSVMatch::csvSafe($_);
+    }
+    print "\n";
+
+    while ( $row = $rows->fetchAssoc()) {
+      $data = unserialize($row['data']);
+      // prepend contact ID
+      print ($row['contact_id'] ? $row['contact_id'] : '""');
+      foreach ($data as $_) {
+        print "," . CiviCRMCSVMatch::csvSafe($_);
+      }
+      print "\n";
+    }
+    exit;
+  }
+  if ($form_state['triggering_element']['#value'] == 'Delete data') {
+    db_truncate('civicrm_csv_match_cache')->execute();
+    drupal_set_message('Data deleted');
+    $form_state['redirect'] = 'civicrm/csvmatch/upload';
+  }
+}
+
+class CiviCRMCSVMatch
+{
+  public static function findContact(&$record) {
+    // if found, set contact ID, set resolution to serialized "update Foo bar".
+    // if not found, store possible matches in array of possibilities keyed by contact_id
+    //  containing keys
+    //  - 'match' why this was a candidate (e.g. email match)
+    //  - 'name' just the name
+
+    // email is most unique. if we have that, start there.
+    if ($record['email']) {
+      // got email
+      $params = array( 'version' => 3, 'sequential' => 1, 'email' => $record['email']);
+      $result = civicrm_api('Contact', 'get', $params);
+      if ($result['count']==1) {
+        // winner
+        $record['contact_id'] = $result['values'][0]['contact_id'];
+        $record['resolution'] = $result['values'][0]['display_name'];
+        $record['state'] = 'found';
+        return;
+      }
+      if ($result['count']>1) {
+        // quick scan to see if there's only one that matches first name
+        $m=array();
+        foreach ($result['values'] as $i=>$contact) {
+          if ($contact['first_name'] == $record['fname']) {
+            $m[] = $i;
+          }
+        }
+        if (count($m) == 1) {
+          $i = reset($m);
+          // got it!
+          $record['contact_id'] = $result['values'][$i]['contact_id'];
+          $record['resolution'] = $result['values'][$i]['display_name'];
+          $record['state'] = 'found';
+          return;
+        }
+
+        // could be any of these contacts
+        $record['resolution'] = array();
+        foreach ($result['values'] as $contact) {
+          $record['resolution'][$contact['contact_id']] = array(
+            'match' => 'Same email',
+            'name'  => $contact['display_name'],
+          );
+        }
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+        return;
+      }
+    }
+    // email did not match, or we did not have an email address.
+
+    if ($record['fname'] && $record['lname']) {
+      // see if we can find them by name.
+      $params = array( 'version' => 3, 'sequential' => 1, 'first_name' => $record['fname'], 'last_name' => $record['lname']);
+      $result = civicrm_api('Contact', 'get', $params);
+      if ($result['count']==1) {
+        // winner
+        $record['contact_id'] = $result['values'][0]['contact_id'];
+        $record['resolution'] = $result['values'][0]['display_name'];
+        $record['state'] = 'found';
+        return;
+      }
+      if ($result['count']>1) {
+        // could be any of these contacts
+        $record['resolution'] = array();
+        foreach ($result['values'] as $contact) {
+          $record['resolution'][$contact['contact_id']] = array(
+            'match' => 'Same name',
+            'name'  => $contact['display_name'],
+          );
+        }
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+        return;
+      }
+
+      // Still not found? OK, probably something weird with the first name.
+      // Let's try last name, with first name as a substring match
+      // see if we can find them by name.
+      $params = array( 'version' => 3, 'sequential' => 1,
+        'first_name' => '%' . $record['fname'] . '%',
+        'last_name' => $record['lname']);
+      $result = civicrm_api('Contact', 'get', $params);
+      if ($result['count']==1) {
+        // winner
+        $record['contact_id'] = $result['values'][0]['contact_id'];
+        $record['resolution'] = $result['values'][0]['display_name'];
+        $record['state'] = 'found';
+        return;
+      }
+      if ($result['count']>1) {
+        // could be any of these contacts
+        $record['resolution'] = array();
+        foreach ($result['values'] as $contact) {
+          $record['resolution'][$contact['contact_id']] = array(
+            'match' => 'Similar name',
+            'name'  => $contact['display_name'],
+          );
+        }
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+        return;
+      }
+
+      // Still not found, let's try first initial.
+      $params = array( 'version' => 3, 'sequential' => 1,
+        'first_name' => substr($record['fname'],0,1) . '%',
+        'last_name' => $record['lname']);
+      $result = civicrm_api('Contact', 'get', $params);
+      if ($result['count']>0) {
+        // Can't assume from the initial, even if just one person.
+        // could be any of these contacts
+        $record['resolution'] = array();
+        foreach ($result['values'] as $contact) {
+          $record['resolution'][$contact['contact_id']] = array(
+            'match' => 'Same last name, initial',
+            'name'  => $contact['display_name'],
+          );
+        }
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+        return;
+      }
+    }
+
+    // OK, maybe the last name is particularly unique?
+    if ($record['lname']) {
+      $params = array( 'version' => 3, 'sequential' => 1, 'last_name' => $record['lname']);
+      $result = civicrm_api('Contact', 'get', $params);
+      if ($result['count']>10) {
+        $record['resolution'] = "(there are more than 10 people with this last name)";
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+      }
+      elseif ($result['count']>0) {
+        // could be any of these contacts
+        $record['resolution'] = array();
+        foreach ($result['values'] as $contact) {
+          $record['resolution'][$contact['contact_id']] = array(
+            'match' => 'Same last name',
+            'name'  => $contact['display_name'],
+          );
+        }
+        $record['state'] = 'multiple';
+        $record['contact_id'] = 0;
+        return;
+      }
+    }
+
+    // if we're here, we only have one name, so let's not bother.
+    $record['state'] = 'impossible';
+    $record['contact_id'] = 0;
+    $record['resolution'] = 'Impossible - no matches for this one.';
+  }
+    public static function csvSafe($string) {
+      return '"' . str_replace('"','""',$string) . '"';
+    }
+}

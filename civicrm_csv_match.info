@@ -1,0 +1,8 @@
+name = CiviCRM CSV Match
+description = Adds a CiviCRM Contact ID field to the end of a CSV file by interactive process.
+package = Artful Robot
+core = 7.x
+files[] = civicrm_csv_match.module
+version = "7.x-0.1"
+;configure = admin/config...
+
