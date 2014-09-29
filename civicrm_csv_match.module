@@ -198,6 +198,23 @@ function civicrm_csv_match_assign($ajax='') {
  */
 function civicrm_csv_match_upload_form() {
 
+  // ----------------------------------------------------------------------------------------
+  if (FALSE) {
+  require_once 'sites/default/civicrm.settings.php';
+  require_once 'CRM/Core/Config.php';
+  require_once 'api/api.php';
+  $config = CRM_Core_Config::singleton( );
+
+  $cids = array(3);
+  //$result= CRM_Contact_BAO_GroupContact::addContactsToGroup($cids, 43);
+  $result= CRM_Contact_BAO_GroupContact::removeContactsFromGroup($cids, 43);
+  return array('#markup'=>"<pre>" . htmlspecialchars(print_r($result,1))."</pre>");
+  }
+  // ----------------------------------------------------------------------------------------
+
+
+
+
   // Warn if data exists.
   if (db_query('SELECT id FROM {civicrm_csv_match_cache} LIMIT 1')->rowCount()) {
     $form[] = array(
@@ -227,6 +244,11 @@ function civicrm_csv_match_upload_form() {
     '#title_display' => 'invisible',
   );
 
+  $form['clean_only'] = array(
+    '#type' => 'checkbox',
+    '#default value' => 0,
+    '#title' => 'Skip ID Lookup (useful if you just want to clean names)',
+  );
   $form['upload'] = array(
     '#type' => 'submit',
     '#value' => t('Upload and process'),
@@ -244,6 +266,9 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   require_once 'api/api.php';
   $config = CRM_Core_Config::singleton( );
 
+  // can take a while...
+  set_time_limit(0);
+
   // If there is data in the table, empty it.
   db_truncate('civicrm_csv_match_cache')->execute();
 
@@ -259,6 +284,7 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   // open the file and import the data.
   $fh = fopen($filename,'r');
   $header=1;
+  $clean_only = $form_state['values']['clean_only'];
   while ($line = fgetcsv($fh)){
     $line = array(
       'contact_id' => 0,
@@ -277,8 +303,15 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
       if (!$line['lname'] && !$line['title'] && $line['fname']) {
         CiviCRMCSVMatch::cleanName($line);
       }
-      CiviCRMCSVMatch::findContact($line);
-      $line['resolution'] = serialize($line['resolution']);
+      if ($clean_only) {
+        $line['resolution'] = '(clean only mode)';
+        $line['resolution'] = serialize($line['resolution']);
+        $line['state'] = 'clean-only';
+      }
+      else {
+        CiviCRMCSVMatch::findContact($line);
+        $line['resolution'] = serialize($line['resolution']);
+      }
     }
 
     $id = db_insert('civicrm_csv_match_cache')
@@ -532,21 +565,27 @@ class CiviCRMCSVMatch
         $record['title'] = $matches[1];
         $record['fname'] = $matches[2];
       }
-      return;
+    }
+    else {
+      $names = preg_split('/\s+/', $names);
+      if (count($names)>1) {
+        // prefix?
+        if (preg_match("/^$titles$/", $names[0])) {
+          $record['title'] = array_shift($names);
+        }
+        // Let's assume the first word is the first name
+        $record['fname'] = array_shift($names);
+        $record['lname'] = implode(' ', $names);
+      }
     }
 
-    $names = preg_split('/\s+/', $names);
-    if (count($names)==1) {
-      // nothing we can do.
-      return;
+    // if all lowercase or all uppercase, then tidy the case.
+    foreach (array('fname','lname','title') as $_) {
+      $name = $record[$_];
+      if (strtolower($name) == $name || strtoupper($name) == $name) {
+        $record[$_] = ucfirst($name);
+      }
     }
-    // prefix?
-    if (preg_match("/^$titles$/", $names[0])) {
-      $record['title'] = array_shift($names);
-    }
-    // Let's assume the first word is the first name
-    $record['fname'] = array_shift($names);
-    $record['lname'] = implode(' ', $names);
   }
   public static function getTitleRegex() {
     if (empty(static::$titles_regexp)) {
