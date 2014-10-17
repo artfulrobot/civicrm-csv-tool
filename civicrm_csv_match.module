@@ -88,33 +88,8 @@ function civicrm_csv_match_dash() {
       htmlspecialchars($row['lname']) . "</td><td>" .
       htmlspecialchars($row['email']) . "</td><td>" ;
 
-    if ($row['resolution']) {
-      $res = unserialize($row['resolution']);
-      if (is_string($res)) {
-        if ($row['contact_id']) {
-          $html .= "Found: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>";
-        }
-        else {
-          $html .= $res;
-        }
-      }
-      elseif (is_array($res)) {
-        $html .= "Could be: <ul>";
-        foreach ($res as $cid=>$r) {
-          $html .= "<li>"
-            .htmlspecialchars($r['name'] . " ($r[match])")
-            ." <a href='/civicrm/contact/view?reset=1&cid=$cid' target='_blank' >View</a> | "
-            ." <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=$cid' class='choose-link' data-cid='$cid' >Choose</a> "
-            .'</li>';
-        }
-        $html .= "</ul>";
-      }
-      else {
-        // shouldn't happen
-        $html .= 'ERROR';
-      }
-      $html .= '</td></tr>';
-    }
+    $html .= CiviCRMCSVMatch::resolutionHtml($row);
+    $html .= '</td></tr>';
   }
   $html .= "</tbody></table>";
 
@@ -132,11 +107,12 @@ function civicrm_csv_match_assign($ajax='') {
   require_once 'sites/default/civicrm.settings.php';
   require_once 'CRM/Core/Config.php';
   require_once 'api/api.php';
-  $config = CRM_Core_Config::singleton( );
+  CRM_Core_Config::singleton( );
 
   $record_id = (int) $_GET['rec'];
   $contact_id = (int) $_GET['cid'];
-  if (!($record_id>0) || !($contact_id>0)) {
+
+  if (!($record_id>0)) {
     if ($ajax) {
       return 'Odd call. Try reloading the page.';
     }
@@ -145,12 +121,7 @@ function civicrm_csv_match_assign($ajax='') {
   }
 
   // load the record
-  $record = db_select("civicrm_csv_match_cache", "todo")
-    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
-    ->condition('id', $record_id)
-    ->condition('state', 'header', '!=')
-    ->execute()
-    ->fetchAssoc();
+  $record = CiviCRMCSVMatch::loadCacheRecord($record_id);
   if (!$record) {
     if ($ajax) {
       return 'Odd call. Try reloading the page.';
@@ -159,34 +130,67 @@ function civicrm_csv_match_assign($ajax='') {
     drupal_goto('civicrm/csvmatch');
   }
 
-  // check contact_id exists.
-  $params = array( 'version' => 3, 'sequential' => 1, 'contact_id' => $contact_id);
-  $result = civicrm_api('Contact', 'get', $params);
-  if ($result['count']!=1) {
-    if ($ajax) {
-      return 'Odd call. Try reloading the page.';
+  // If called with a contact_id, we want to assign that, otherwise we're doing a reset on this row.
+  if ($contact_id > 0) {
+    // Assign: check contact_id exists.
+    $params = array( 'version' => 3, 'sequential' => 1, 'contact_id' => $contact_id);
+    $result = civicrm_api('Contact', 'get', $params);
+    if ($result['count']!=1) {
+      if ($ajax) {
+        return 'Odd call. Try reloading the page.';
+      }
+      drupal_set_message("Odd call 3. Ignored it.");
+      drupal_goto('civicrm/csvmatch');
     }
-    drupal_set_message("Odd call 3. Ignored it.");
-    drupal_goto('civicrm/csvmatch');
-  }
 
-  // OK, update it.
-  db_update('civicrm_csv_match_cache')
-    ->fields(array(
-      'state' => 'found',
-      'contact_id' => $contact_id,
-      'resolution' => serialize($result['values'][0]['display_name']),
-    ))
-    ->condition('id', $record_id)
-    ->execute();
+    // OK, update it.
+    db_update('civicrm_csv_match_cache')
+      ->fields(array(
+        'state' => 'chosen',
+        'contact_id' => $contact_id,
+        'resolution' => serialize($result['values'][0]['display_name']),
+      ))
+      ->condition('id', $record_id)
+      ->execute();
+    $record = CiviCRMCSVMatch::loadCacheRecord($record_id);
 
     if ($ajax) {
-      // need to return the HTML for the chosen person.
-      print "Found: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >"
-        . htmlspecialchars($result['values'][0]['display_name'])
-        .  "</a> ";
+      print CiviCRMCSVMatch::resolutionHtml($record);
       exit;
     }
+  }
+  else {
+    // de-assign/reset
+
+    /*
+    $line = array(
+      'contact_id' => 0,
+      'title' => $line[0],
+      'fname' => $line[1],
+      'lname' => $line[2],
+      'email' => $line[3],
+      'data' => serialize($line),
+    );
+*/
+    CiviCRMCSVMatch::findContact($record);
+    $record['resolution'] = serialize($record['resolution']);
+    // OK, update it.
+    db_update('civicrm_csv_match_cache')
+      ->fields(array(
+        'state' => $record['state'],
+        'contact_id' => $record['contact_id'],
+        'resolution' => $record['resolution'],
+      ))
+      ->condition('id', $record_id)
+      ->execute();
+    $record = CiviCRMCSVMatch::loadCacheRecord($record_id);
+
+    if ($ajax) {
+      print CiviCRMCSVMatch::resolutionHtml($record);
+      exit;
+    }
+
+  }
 
   drupal_goto('civicrm/csvmatch', array(
     'query' => array(
@@ -275,8 +279,8 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   // check the file uploaded.
   $filename = $_FILES['files']['tmp_name']['csvfile'];
   $filetype = $_FILES['files']['type']['csvfile'];
-
-  if ($filetype != 'text/csv') {
+  // Turns out CSV may be classified in a number of ways
+  if (!preg_match('@^(text|application)/(x-)?(csv|comma-separated-values)$@',$filetype)) {
     drupal_set_message("Uploaded file not recognised as csv");
     return $form;
   }
@@ -408,9 +412,23 @@ class CiviCRMCSVMatch
 
     // email is most unique. if we have that, start there.
     if ($record['email']) {
-      // got email
-      $params = array( 'version' => 3, 'sequential' => 1, 'email' => $record['email']);
-      $result = civicrm_api('Contact', 'get', $params);
+      // got email look it up in the email table
+      $result = civicrm_api3('Email', 'get', array( 'sequential' => 1, 'email' =>$record['email']));
+      if ($result['count']>0) {
+        // We need to join the contact name details onto our email matches array.
+        $contact_ids = array();
+        foreach ($result['values'] as $_) {
+          $contact_ids[] = (int) $_['contact_id'];
+        }
+        // Get unique contacts, keyed by contact_id
+        $contacts = civicrm_api3('Contact', 'get', array('id' => array('IN' => $contact_ids), 'sequential' => 0));
+        foreach ($result['values'] as &$_) {
+          $contact = $contacts['values'][$_['contact_id']];
+          $_['first_name'] = $contact['first_name'];
+          $_['display_name'] = $contact['display_name'];
+          unset($_);
+        }
+      }
       if ($result['count']==1) {
         // winner
         $record['contact_id'] = $result['values'][0]['contact_id'];
@@ -422,7 +440,7 @@ class CiviCRMCSVMatch
         // quick scan to see if there's only one that matches first name
         $m=array();
         foreach ($result['values'] as $i=>$contact) {
-          if ($contact['first_name'] == $record['fname']) {
+          if ($contact['first_name'] && $record['fname'] && $contact['first_name'] == $record['fname']) {
             $m[] = $i;
           }
         }
@@ -602,4 +620,54 @@ class CiviCRMCSVMatch
     public static function csvSafe($string) {
       return '"' . str_replace('"','""',$string) . '"';
     }
+  /**
+   * Generates the HTML for a particular matched row
+   */
+  static function resolutionHtml($row) {
+    if ($row['resolution']) {
+      $res = unserialize($row['resolution']);
+      if (is_string($res)) {
+        if ($row['contact_id']) {
+          if ($row['state'] == 'found') {
+            return "Found: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>";
+          }
+          else {
+            // manually chosen, allow reset.
+            return "Chosen: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>"
+              ." | <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=0' class='choose-link' data-cid='0' >Reset</a> ";
+          }
+        }
+        else {
+          return $res;
+        }
+      }
+      elseif (is_array($res)) {
+        $html = "Could be: <ul>";
+        foreach ($res as $cid=>$r) {
+          $html .= "<li>"
+            .htmlspecialchars($r['name'] . " ($r[match])")
+            ." <a href='/civicrm/contact/view?reset=1&cid=$cid' target='_blank' >View</a> | "
+            ." <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=$cid' class='choose-link' data-cid='$cid' >Choose</a> "
+            .'</li>';
+        }
+        $html .= "</ul>";
+        return $html;
+      }
+      else {
+        // shouldn't happen
+        return 'ERROR';
+      }
+    }
+  }
+  /**
+   * Load the cache table data entry (not headers)
+   */
+  public static function loadCacheRecord($record_id) {
+    return db_select("civicrm_csv_match_cache", "todo")
+      ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
+      ->condition('id', $record_id)
+      ->condition('state', 'header', '!=')
+      ->execute()
+      ->fetchAssoc();
+  }
 }

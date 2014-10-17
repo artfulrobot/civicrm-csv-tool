@@ -5,8 +5,9 @@ Drupal.behaviors.csv_match = {
           e.preventDefault && e.preventDefault();
           // fire ajax request to choose this link.
           var url = jQuery(this).attr('href').replace('\/assign','/assign/ajax');
-          jQuery(this).closest('td').load(url)
-            .closest('tr').attr('class','found');
+          var className = jQuery(this).text() == 'Reset' ? 'multiple' : 'found';
+          jQuery(this).closest('td').load(url, function() { Drupal.attachBehaviors(this); } )
+            .closest('tr').attr('class',className);
             });
     }
 };
