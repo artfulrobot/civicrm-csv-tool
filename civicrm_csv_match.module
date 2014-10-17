@@ -18,6 +18,11 @@ function civicrm_csv_match_menu()
     'access arguments' =>  array('view all contacts'),
     'type' => MENU_CALLBACK,
   );
+	$items['civicrm/csvmatch/create'] = array(
+    'page callback' => 'civicrm_csv_match_create',
+    'access arguments' =>  array('view all contacts'),
+    'type' => MENU_CALLBACK,
+  );
 	$items['civicrm/csvmatch/dash'] = array(
     'title' => 'Clean',
     'type' => MENU_DEFAULT_LOCAL_TASK,
@@ -64,6 +69,83 @@ function civicrm_csv_match_menu()
 /**
  * List the work to do, if any.
  */
+function civicrm_csv_match_create() {
+  require_once 'sites/default/civicrm.settings.php';
+  require_once 'CRM/Core/Config.php';
+  require_once 'api/api.php';
+  CRM_Core_Config::singleton( );
+  // If there is no table, we're done.
+  if (!db_query('SELECT id FROM {civicrm_csv_match_cache} WHERE state=\'impossible\' LIMIT 1')->rowCount()) {
+    drupal_set_message("There is no data that needs new contacts creating.");
+    drupal_goto('civicrm/csvmatch/dash');
+  }
+
+  // There is a table. Show the contents that's outstanding.
+  $rows = db_select("civicrm_csv_match_cache", "todo")
+    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
+    ->condition('state', 'impossible')
+    ->execute();
+
+  // Loop the rows and create the contacts
+  // Look out for duplicate entries, this is a possibility
+  $duplicates = array();
+  $count = 0;
+  foreach ($rows as $row) {
+    $row = (array) $row;
+    $hash = md5($row['fname'] . $row['lname'] . $row['email']);
+    if (isset($duplicates[$hash])) {
+      // update row
+      db_update('civicrm_csv_match_cache')
+        ->fields(array(
+          'state' => 'found',
+          'contact_id' => $duplicates[$hash]['contact_id'],
+          'resolution' => $duplicates[$hash]['resolution'],
+        ))
+        ->condition('id', $row['id'])
+        ->execute();
+      continue;
+    }
+
+    // @todo title - would require looking up individual prefix YUK.
+    $params = array(
+      'sequential' => 1,
+      'contact_type' => "Individual",
+      'first_name' => $row['fname'],
+      'last_name' => $row['lname'],
+    );
+    if ($row['email']) {
+      $params['email'] = $row['email'];
+    }
+    $result = civicrm_api3('Contact', 'create', $params);
+    if ($result['is_error']) {
+      drupal_set_message("Error creating contact $row[fname] $row[lname]", 'error');
+      continue;
+    }
+    $count++;
+    $contact = $result['values'][0];
+    // Remember this so we don't create duplicates.
+    $duplicates[$hash] = array(
+      'contact_id' => $contact['id'],
+      'resolution' => serialize($contact['display_name']),
+    );
+
+    // update row
+    db_update('civicrm_csv_match_cache')
+      ->fields(array(
+        'state' => 'found',
+        'contact_id' => $contact['id'],
+        'resolution' => serialize($contact['display_name']),
+      ))
+      ->condition('id', $row['id'])
+      ->execute();
+  }
+  drupal_set_message( $count . " contacts created");
+  drupal_goto('civicrm/csvmatch/dash');
+}
+
+/**
+ * List the work to do, if any.
+ */
 function civicrm_csv_match_dash() {
 
   // If there is no table, we're done.
@@ -79,10 +161,12 @@ function civicrm_csv_match_dash() {
     ->orderBy('state','DESC')
     ->execute();
 
-  $html = "<h2>Data</h2><table><thead>
+  $html = "<table><thead>
      <tr><th>First Name</th><th>Last Name</th><th>Email</th><th>Resolution</th></tr>
      </thead><tbody>";
+  $counts = array('impossible' => 0, 'multiple' => 0,'chosen'=>0,'found'=>0);
   while($row = $rows->fetchAssoc()) {
+    $counts[$row['state']]++;
     $html .= "<tr class='$row[state]'><td>" .
       htmlspecialchars($row['fname']) . "</td><td>" .
       htmlspecialchars($row['lname']) . "</td><td>" .
@@ -92,6 +176,15 @@ function civicrm_csv_match_dash() {
     $html .= '</td></tr>';
   }
   $html .= "</tbody></table>";
+
+  $html = "<h2>Data</h2><p>Here is the data that you uploaded. "
+    . ($counts['found']>0 ? "$counts[found] contact(s) were automatically matched. " : "")
+    . ($counts['chosen']>0 ? "$counts[chosen] ambiguous match(es) have been resolved by you. " : "")
+    . ($counts['multiple']>0 ? "$counts[multiple] contact(s) could not be automatically matched because the data
+   is ambiguous, e.g. two contacts with same email or name. With these you should choose from the possibilities below. " : "")
+    . ($counts['impossible']>0 ? "<p>There are contacts below for which no contact record could be found. You can <a href='/civicrm/csvmatch/create' >create contact records for them now</a> if you like. You won't be able to import contributions (activities etc.) until these contacts do exist.</p>" : "")
+    . ($counts['impossible'] == 0 && $counts['multiple'] == 0 ? "<p><strong>All the rows have a contact match so this dataset looks ready for you to download now.</strong></p>" : "")
+    . $html;
 
   return array('#markup' => $html,
     '#attached' => array(
@@ -292,10 +385,10 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   while ($line = fgetcsv($fh)){
     $line = array(
       'contact_id' => 0,
-      'title' => $line[0],
-      'fname' => $line[1],
-      'lname' => $line[2],
-      'email' => $line[3],
+      'title' => trim($line[0]),
+      'fname' => trim($line[1]),
+      'lname' => trim($line[2]),
+      'email' => trim($line[3]),
       'data' => serialize($line),
     );
 
