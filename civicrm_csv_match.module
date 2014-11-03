@@ -75,22 +75,20 @@ function civicrm_csv_match_create() {
   require_once 'api/api.php';
   CRM_Core_Config::singleton( );
   // If there is no table, we're done.
-  if (!db_query('SELECT id FROM {civicrm_csv_match_cache} WHERE state=\'impossible\' LIMIT 1')->rowCount()) {
+  if (!db_query('SELECT id FROM {civicrm_csv_match_cache} WHERE state=\'impossible\' OR (state=\'chosen\' AND contact_id=0) LIMIT 1')->rowCount()) {
     drupal_set_message("There is no data that needs new contacts creating.");
     drupal_goto('civicrm/csvmatch/dash');
   }
 
   // There is a table. Show the contents that's outstanding.
-  $rows = db_select("civicrm_csv_match_cache", "todo")
-    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
-    ->condition('state', 'impossible')
-    ->execute();
+  $rows = db_query("SELECT * FROM {civicrm_csv_match_cache} todo
+    WHERE ( state = 'impossible' ) OR ( state = 'chosen' AND contact_id = 0 )");
 
   // Loop the rows and create the contacts
   // Look out for duplicate entries, this is a possibility
   $duplicates = array();
   $count = 0;
-  foreach ($rows as $row) {
+  while ($row = $rows->fetchAssoc()) {
     $row = (array) $row;
     $hash = md5($row['fname'] . $row['lname'] . $row['email']);
     if (isset($duplicates[$hash])) {
@@ -155,22 +153,25 @@ function civicrm_csv_match_dash() {
   }
 
   // There is a table. Show the contents that's outstanding.
-  $rows = db_select("civicrm_csv_match_cache", "todo")
-    ->fields('todo', array('id','fname','lname','email','state','contact_id', 'resolution'))
-    ->condition('state', 'header', '!=')
-    ->orderBy('state','DESC')
-    ->execute();
+  $rows = db_query("
+    SELECT *, COUNT(id) set_count FROM {civicrm_csv_match_cache} todo
+    WHERE state != 'header'
+    GROUP BY fname, lname, email");
 
   $html = "<table><thead>
-     <tr><th>First Name</th><th>Last Name</th><th>Email</th><th>Resolution</th></tr>
+     <tr><th>Name and email</th><th>Resolution</th></tr>
      </thead><tbody>";
   $counts = array('impossible' => 0, 'multiple' => 0,'chosen'=>0,'found'=>0);
   while($row = $rows->fetchAssoc()) {
     $counts[$row['state']]++;
-    $html .= "<tr class='$row[state]'><td>" .
-      htmlspecialchars($row['fname']) . "</td><td>" .
-      htmlspecialchars($row['lname']) . "</td><td>" .
-      htmlspecialchars($row['email']) . "</td><td>" ;
+    $html .= "<tr class='$row[state]'><td valign='top'>" .
+      ($row['set_count']>1 ? $row['set_count'] . " rows from: " : '') .
+      htmlspecialchars($row['fname']) . " " .
+      htmlspecialchars($row['lname']) . "<br/>" .
+      (strlen($row['email'])>40
+       ? "<span title='" .htmlspecialchars($row['email']) . "' >" . htmlspecialchars(substr($row['email'], 0, 30)) . '&hellip;</span>'
+       : htmlspecialchars($row['email']))
+      . "</td><td>" ;
 
     $html .= CiviCRMCSVMatch::resolutionHtml($row);
     $html .= '</td></tr>';
@@ -204,6 +205,7 @@ function civicrm_csv_match_assign($ajax='') {
 
   $record_id = (int) $_GET['rec'];
   $contact_id = (int) $_GET['cid'];
+  $mark_impossible = !empty($_GET['new']);
 
   if (!($record_id>0)) {
     if ($ajax) {
@@ -236,16 +238,10 @@ function civicrm_csv_match_assign($ajax='') {
       drupal_goto('civicrm/csvmatch');
     }
 
-    // OK, update it.
-    db_update('civicrm_csv_match_cache')
-      ->fields(array(
-        'state' => 'chosen',
-        'contact_id' => $contact_id,
-        'resolution' => serialize($result['values'][0]['display_name']),
-      ))
-      ->condition('id', $record_id)
-      ->execute();
-    $record = CiviCRMCSVMatch::loadCacheRecord($record_id);
+    $record['state'] = 'chosen';
+    $record['contact_id'] = $contact_id;
+    $record['resolution'] = serialize($result['values'][0]['display_name']);
+    CiviCRMCSVMatch::updateCacheRecords($record);
 
     if ($ajax) {
       print CiviCRMCSVMatch::resolutionHtml($record);
@@ -253,7 +249,7 @@ function civicrm_csv_match_assign($ajax='') {
     }
   }
   else {
-    // de-assign/reset
+    // de-assign/reset or set deliberately impossible
 
     /*
     $line = array(
@@ -265,24 +261,23 @@ function civicrm_csv_match_assign($ajax='') {
       'data' => serialize($line),
     );
 */
-    CiviCRMCSVMatch::findContact($record);
-    $record['resolution'] = serialize($record['resolution']);
+    if (!$mark_impossible) {
+      CiviCRMCSVMatch::findContact($record);
+    }
+    else {
+      // user is saying this is a new person
+      $record['contact_id'] = 0;
+      $record['state'] = 'chosen';
+      $record['resolution'] = '';
+    }
     // OK, update it.
-    db_update('civicrm_csv_match_cache')
-      ->fields(array(
-        'state' => $record['state'],
-        'contact_id' => $record['contact_id'],
-        'resolution' => $record['resolution'],
-      ))
-      ->condition('id', $record_id)
-      ->execute();
-    $record = CiviCRMCSVMatch::loadCacheRecord($record_id);
+    $record['resolution'] = serialize($record['resolution']);
+    CiviCRMCSVMatch::updateCacheRecords($record);
 
     if ($ajax) {
       print CiviCRMCSVMatch::resolutionHtml($record);
       exit;
     }
-
   }
 
   drupal_goto('civicrm/csvmatch', array(
@@ -459,7 +454,7 @@ function civicrm_csv_match_download_form_submit($form, &$form_state) {
     drupal_add_http_header('Content-Disposition', 'attachment; filename = data.csv');
 
     // prepend contact ID and new name fields - just so we're not overwriting the old data.
-    print '"Contact ID","Title", "First Name", "Last Name"';
+    print '"Internal ID","Title", "First Name", "Last Name"';
     $header = $rows->fetchAssoc();
     // unpack original header line
     $data = unserialize($header['data']);
@@ -726,24 +721,38 @@ class CiviCRMCSVMatch
           }
           else {
             // manually chosen, allow reset.
-            return "Chosen: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>"
-              ." | <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=0' class='choose-link' data-cid='0' >Reset</a> ";
+            if ($row['contact_id']>0) {
+              $html = "Chosen: <a href='/civicrm/contact/view?reset=1&cid=$row[contact_id]' target='_blank' >$res</a>";
+            }
+            else {
+              $html = "New contact";
+            }
+            $html .= " | <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=0' class='choose-link' data-cid='0' >Reset</a> ";
+            return $html;
           }
         }
         else {
-          return $res;
+          // No contact Id
+          if ($row['state'] == 'chosen') {
+              return "New contact | <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=0' class='choose-link' data-cid='0' >Reset</a> ";
+          }
+          else {
+            return $res;
+          }
         }
       }
       elseif (is_array($res)) {
+        // multiple
         $html = "Could be: <ul>";
         foreach ($res as $cid=>$r) {
           $html .= "<li>"
             .htmlspecialchars($r['name'] . " ($r[match])")
             ." <a href='/civicrm/contact/view?reset=1&cid=$cid' target='_blank' >View</a> | "
             ." <a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=$cid' class='choose-link' data-cid='$cid' >Choose</a> "
-            .'</li>';
+            .'</li>'
+            ;
         }
-        $html .= "</ul>";
+        $html .= "</ul>\n<a href='/civicrm/csvmatch/assign?rec=$row[id]&cid=0&new=1' class='choose-link' data-cid='0' >None of these</a> ";
         return $html;
       }
       else {
@@ -762,5 +771,22 @@ class CiviCRMCSVMatch
       ->condition('state', 'header', '!=')
       ->execute()
       ->fetchAssoc();
+  }
+  /**
+   * Update cache records that match the one sent on name, email.
+   */
+  public static function updateCacheRecords($record) {
+    $x=1;
+    db_update('civicrm_csv_match_cache')
+      ->fields(array(
+        'state' => $record['state'],
+        'contact_id' => $record['contact_id'],
+        'resolution' => $record['resolution'],
+      ))
+      ->condition('fname', $record['fname'])
+      ->condition('lname', $record['lname'])
+      ->condition('state', 'header', '!=')
+      ->condition('email', $record['email'])
+      ->execute();
   }
 }
