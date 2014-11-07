@@ -163,7 +163,18 @@ function civicrm_csv_match_dash() {
      </thead><tbody>";
   $counts = array('impossible' => 0, 'multiple' => 0,'chosen'=>0,'found'=>0);
   while($row = $rows->fetchAssoc()) {
-    $counts[$row['state']]++;
+    switch($row['state']) {
+    case 'chosen':
+      if ($row['contact_id']) {
+        $counts['chosen']++;
+      } else {
+        $counts['impossible']++;
+      }
+      break;
+    default:
+      $counts[$row['state']]++;
+    }
+
     $html .= "<tr class='$row[state]'><td valign='top'>" .
       ($row['set_count']>1 ? $row['set_count'] . " rows from: " : '') .
       htmlspecialchars($row['fname']) . " " .
@@ -178,14 +189,7 @@ function civicrm_csv_match_dash() {
   }
   $html .= "</tbody></table>";
 
-  $html = "<h2>Data</h2><p>Here is the data that you uploaded. "
-    . ($counts['found']>0 ? "$counts[found] contact(s) were automatically matched. " : "")
-    . ($counts['chosen']>0 ? "$counts[chosen] ambiguous match(es) have been resolved by you. " : "")
-    . ($counts['multiple']>0 ? "$counts[multiple] contact(s) could not be automatically matched because the data
-   is ambiguous, e.g. two contacts with same email or name. With these you should choose from the possibilities below. " : "")
-    . ($counts['impossible']>0 ? "<p>There are contacts below for which no contact record could be found. You can <a href='/civicrm/csvmatch/create' >create contact records for them now</a> if you like. You won't be able to import contributions (activities etc.) until these contacts do exist.</p>" : "")
-    . ($counts['impossible'] == 0 && $counts['multiple'] == 0 ? "<p><strong>All the rows have a contact match so this dataset looks ready for you to download now.</strong></p>" : "")
-    . $html;
+  $html = CiviCRMCSVMatch::getSummary($counts) . $html;
 
   return array('#markup' => $html,
     '#attached' => array(
@@ -244,7 +248,10 @@ function civicrm_csv_match_assign($ajax='') {
     CiviCRMCSVMatch::updateCacheRecords($record);
 
     if ($ajax) {
-      print CiviCRMCSVMatch::resolutionHtml($record);
+      $response['className'] = $record['state'];
+      $response['item'] = CiviCRMCSVMatch::resolutionHtml($record);
+      $response['summary'] = CiviCRMCSVMatch::getSummary();
+      print json_encode($response);
       exit;
     }
   }
@@ -275,7 +282,10 @@ function civicrm_csv_match_assign($ajax='') {
     CiviCRMCSVMatch::updateCacheRecords($record);
 
     if ($ajax) {
-      print CiviCRMCSVMatch::resolutionHtml($record);
+      $response['item'] = CiviCRMCSVMatch::resolutionHtml($record);
+      $response['className'] = $record['state'];
+      $response['summary'] = CiviCRMCSVMatch::getSummary();
+      print json_encode($response);
       exit;
     }
   }
@@ -368,10 +378,21 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   $filename = $_FILES['files']['tmp_name']['csvfile'];
   $filetype = $_FILES['files']['type']['csvfile'];
   // Turns out CSV may be classified in a number of ways
-  if (!preg_match('@^(text|application)/(x-)?(csv|comma-separated-values)$@',$filetype)) {
+  if (!preg_match('@^(text|application)/((x-)?((csv|comma-separated-values))|vnd.ms-excel)$@',$filetype)) {
     drupal_set_message("Uploaded file not recognised as csv");
     return $form;
   }
+
+  // first we need to ensure the file to UTF8 because fgetcsv assumes this.
+  $file = file_get_contents($filename);
+  $enc = mb_detect_encoding($file, 'ISO-5591-1, cp1252, UTF-8', TRUE);
+  if ($enc !== 'UTF-8') {
+    // default to latin1 if unable to detect
+    $enc = $enc ? $enc : 'ISO-8859-1';
+    $file = mb_convert_encoding($file, 'UTF-8', $enc);
+    file_put_contents($filename, $file);
+  }
+  unset($file);
 
   // open the file and import the data.
   $fh = fopen($filename,'r');
@@ -760,6 +781,41 @@ class CiviCRMCSVMatch
         return 'ERROR';
       }
     }
+  }
+  static function getSummary($counts = null) {
+    // Summarise data
+
+    if ($counts === null) {
+      $rows = db_query("
+        SELECT *, COUNT(id) set_count FROM {civicrm_csv_match_cache} todo
+        WHERE state != 'header'
+        GROUP BY fname, lname, email");
+
+      $counts = array('impossible' => 0, 'multiple' => 0,'chosen'=>0,'found'=>0);
+      while($row = $rows->fetchAssoc()) {
+        switch($row['state']) {
+        case 'chosen':
+          if ($row['contact_id']) {
+            $counts['chosen']++;
+          } else {
+            $counts['impossible']++;
+          }
+          break;
+        default:
+          $counts[$row['state']]++;
+        }
+      }
+    }
+
+    return "<div id='csv-match-summary'><h2>Data</h2><p>Here is the data that you uploaded. "
+    . ($counts['found']>0 ? "$counts[found] contact(s) were automatically matched. " : "")
+    . ($counts['chosen']>0 ? "$counts[chosen] ambiguous match(es) have been resolved by you. " : "")
+    . ($counts['multiple']>0 ? "$counts[multiple] contact(s) could not be automatically matched because the data
+   is ambiguous, e.g. two contacts with same email or name. With these you should choose from the possibilities below. " : "")
+    . ($counts['impossible']>0 ? "<p>There are $counts[impossible] contacts below for which no contact record could be found. You can <a href='/civicrm/csvmatch/create' >create contact records for them now</a> if you like. You won't be able to import contributions (activities etc.) until these contacts do exist.</p>" : "")
+    . ($counts['impossible'] == 0 && $counts['multiple'] == 0 ? "<p><strong>All the rows have a contact match so this dataset looks ready for you to download now.</strong></p>" : "")
+    . '</div>'
+    ;
   }
   /**
    * Load the cache table data entry (not headers)

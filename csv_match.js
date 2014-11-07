@@ -6,9 +6,16 @@ Drupal.behaviors.csv_match = {
           // fire ajax request to choose this link.
           var url = jQuery(this).attr('href').replace('\/assign','/assign/ajax');
           var className = jQuery(this).text() == 'Reset' ? 'multiple' : 'found';
-          jQuery(this).closest('td').load(url, function() { Drupal.attachBehaviors(this); } )
-            .closest('tr').attr('class',className);
-            });
+          var td=jQuery(this).closest('td');
+          jQuery.ajax(url, {
+            complete: function(r) {
+              var obj = JSON.parse(r.responseText);
+              td.html(obj.item).closest('tr').attr('class', obj.className);
+              jQuery('#csv-match-summary').html(obj.summary);
+              Drupal.attachBehaviors(td);
+            }
+            })
+          });
     }
 };
 
