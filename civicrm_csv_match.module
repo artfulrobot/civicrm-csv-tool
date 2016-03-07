@@ -416,6 +416,7 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   $fh = fopen($filename,'r');
   $header=1;
   $clean_only = $form_state['values']['clean_only'];
+  $skipped_blanks = 0;
   while ($line = fgetcsv($fh)){
     $line = array(
       'contact_id' => 0,
@@ -425,7 +426,10 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
       'email' => trim($line[3]),
       'data' => serialize($line),
     );
-
+    if ("$line[fname]$line[lname]$line[email]" == '') {
+      $skipped_blanks++;
+      continue;
+    }
     if ($header) {
       $line['state'] = 'header';
       $header = 0;
@@ -451,6 +455,9 @@ function civicrm_csv_match_upload_form_submit($form, &$form_state) {
   }
   fclose($fh);
   unlink($filename);
+  if ($skipped_blanks) {
+    drupal_set_message("Warning: the file contained $skipped_blanks blank rows (i.e. did not have name or email). These were ignored, however the job would have been much quicker if they weren't included in the upload :-)", 'warning');
+  }
 
   $form_state['redirect'] = 'civicrm/csvmatch/dash';
 }
