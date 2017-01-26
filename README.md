@@ -1,6 +1,12 @@
 # civicrm-csv-tool
 Drupal module to interactively add CiviCRM Contact ID to CSV data to help with imports.
 
+## This module is deprecated! Long live this functionality!
+
+**I have since rewritten this as a [CiviCRM extension](https://github.com/artfulrobot/uk.artfulrobot.civicrm.importhelper) which should make it easier to install, and of course makes it work under Wordpress, too. No further develpoment will go on in this Drupal module**.
+
+---------------------------------------
+
 See [intro blog](http://artfulrobot.com/blog/tool-help-import-payments-and-memberships-without-emails-civicrm).
 
 # Installation
